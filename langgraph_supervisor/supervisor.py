@@ -1,18 +1,81 @@
+"""LangGraph Supervisor: Hierarchical Multi-Agent Orchestration System
+
+## L1 Core Terms:
+- StateGraph: Container for the entire agent workflow
+- Supervisor Agent: Central agent that delegates tasks
+- Specialized Agents: Domain-specific agents with unique tools
+- Handoff Protocol: System for passing tasks between agents
+- Message Routing: System that controls conversation flow
+- Node: A processing unit in the graph (supervisor agent or specialized agent)
+- Edge: A connection between nodes defining possible transitions
+- Workflow: The complete system of nodes and edges that processes requests
+- Task: A unit of work delegated from supervisor to specialized agent
+- Tool: A function that an agent can call to perform specific actions
+
+## How Components Connect (Justin Sung Framework):
+- L1 (What): StateGraph connects nodes (supervisor and specialized agents)
+- L2 (How): The supervisor analyzes tasks and delegates to specialized agents via handoff tools
+- L3 (Why): This creates a modular, extensible system where expertise is distributed
+- L4 (When/When Not): Ideal for complex problems requiring multiple skills; unnecessary for simple tasks
+
+This module implements a hierarchical multi-agent system pattern where a supervisor agent
+coordinates a team of specialized agents. Key components working together:
+
+1. StateGraph - The core workflow container that defines the execution paths between agents
+   using a directed graph with START and END nodes.
+
+2. Supervisor Agent - Created using create_react_agent(), this central orchestration agent:
+   - Receives user requests
+   - Analyzes tasks and decides which specialized agent to delegate to
+   - Uses automatically generated handoff tools to delegate tasks
+   - Aggregates results from specialized agents into a coherent response
+
+3. Specialized Agents - Domain-specific agents created separately, each:
+   - Focused on a particular capability (math, research, etc.)
+   - Has access to specific tools that match its expertise
+   - Processes delegated subtasks and returns results to the supervisor
+
+4. Handoff Protocol - Enables delegation between agents:
+   - create_handoff_tool() generates tools for the supervisor to delegate
+   - create_handoff_back_messages() adds protocol messages for returning control
+   - Manages context preservation during agent transitions
+
+5. Message Routing - Controls conversation flow through the system:
+   - OutputMode determines how much conversation history is preserved
+   - add_messages annotation provides append semantics for conversation history
+   - Agent messages are wrapped and processed for consistent handling
+
+The workflow forms a star topology with the supervisor at the center, connecting
+to all specialized agents. Each agent interaction follows a cycle:
+user → supervisor → specialized agent → supervisor → user.
+"""
+
 import inspect
 from typing import Any, Callable, Literal, Optional, Sequence, Type, Union, cast, get_args
-from uuid import UUID, uuid5
+from uuid import UUID, uuid5  # Used for deterministic thread_id generation
 from warnings import warn
 
+# LEARNING: LangChain Core - provider-agnostic interfaces for LLMs, messages, and tools
+# TLDR: These imports let us work with any AI model using the same code patterns
 from langchain_core.language_models import BaseChatModel, LanguageModelLike
 from langchain_core.messages import AnyMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
+
+# LEARNING: LangGraph internal utilities for graph configuration and execution
+# TLDR: These are the behind-the-scenes tools that make our agent system work
 from langgraph._internal._config import patch_configurable
 from langgraph._internal._runnable import RunnableCallable, RunnableLike
 from langgraph._internal._typing import DeprecatedKwargs
+
+# LEARNING: LangGraph core components for graph-based agent workflows
+# TLDR: These let us build a network of AI helpers that work together
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
+
+# LEARNING: LangGraph ReAct agent components (Reasoning + Acting pattern)
+# TLDR: These help us create AI assistants that can think step-by-step and use tools
 from langgraph.prebuilt.chat_agent_executor import (
     AgentState,
     AgentStateWithStructuredResponse,
@@ -22,11 +85,21 @@ from langgraph.prebuilt.chat_agent_executor import (
     _should_bind_tools,
     create_react_agent,
 )
+
+# LEARNING: LangGraph's Pregel model for distributed agent execution
+# TLDR: This lets our agents work together even across different computers
 from langgraph.pregel import Pregel
 from langgraph.pregel.remote import RemoteGraph
+
+# Enhanced type annotations
 from typing_extensions import Annotated, TypedDict, Unpack
 
+# LEARNING: LangGraph Supervisor internal components
+# TLDR: These help our agents know who they are and who they're talking to
 from langgraph_supervisor.agent_name import AgentNameMode, with_agent_name
+
+# LEARNING: Handoff protocol enables delegation between agents with preserved context
+# TLDR: This lets agents pass tasks to each other without losing conversation history
 from langgraph_supervisor.handoff import (
     METADATA_KEY_HANDOFF_DESTINATION,
     _normalize_agent_name,
@@ -34,17 +107,23 @@ from langgraph_supervisor.handoff import (
     create_handoff_tool,
 )
 
+# LEARNING: Output mode defines message history preservation strategy
+# TLDR: This controls how much of the conversation each agent remembers
 OutputMode = Literal["full_history", "last_message"]
 """Mode for adding agent outputs to the message history in the multi-agent workflow
 
-- `full_history`: add the entire agent message history
-- `last_message`: add only the last message
+- `full_history`: add the entire agent message history (preserves context but increases token usage)
+- `last_message`: add only the last message (optimizes for context window efficiency)
 """
 
 
+# LEARNING: Models that don't support parallel function calling capability
+# TLDR: Some AI models can only do one thing at a time, not multiple things in parallel
 MODELS_NO_PARALLEL_TOOL_CALLS = {"o3-mini", "o3", "o4-mini"}
 
 
+# LEARNING: Provider capability detection for parallel tool call configuration
+# TLDR: This checks if an AI model can be told not to do multiple things at once
 def _supports_disable_parallel_tool_calls(model: LanguageModelLike) -> bool:
     if not isinstance(model, BaseChatModel):
         return False
@@ -63,11 +142,13 @@ def _supports_disable_parallel_tool_calls(model: LanguageModelLike) -> bool:
     return True
 
 
+# LEARNING: Higher-order function that generates agent invocation wrappers
+# TLDR: Creates a special way to talk to each AI helper that ensures consistent responses
 def _make_call_agent(
-    agent: Pregel[Any],
-    output_mode: OutputMode,
-    add_handoff_back_messages: bool,
-    supervisor_name: str,
+    agent: Pregel[Any],  # Target agent workflow
+    output_mode: OutputMode,  # Message history management strategy
+    add_handoff_back_messages: bool,  # Protocol message insertion control
+    supervisor_name: str,  # Supervisor identity for routing
 ) -> Callable[[dict], dict] | RunnableCallable:
     if output_mode not in get_args(OutputMode):
         raise ValueError(
@@ -129,6 +210,10 @@ def _make_call_agent(
 
 def _get_handoff_destinations(tools: Sequence[BaseTool | Callable]) -> list[str]:
     """Extract handoff destinations from provided tools.
+    
+    Implements metadata-based discovery of agent delegation targets,
+    enabling automatic validation of supervisor routing capabilities.
+    
     Args:
         tools: List of tools to inspect.
     Returns:
@@ -144,12 +229,17 @@ def _get_handoff_destinations(tools: Sequence[BaseTool | Callable]) -> list[str]
 
 
 def _prepare_tool_node(
-    tools: list[BaseTool | Callable] | ToolNode | None,
-    handoff_tool_prefix: Optional[str],
-    add_handoff_messages: bool,
-    agent_names: set[str],
+    tools: list[BaseTool | Callable] | ToolNode | None,  # User-provided tools
+    handoff_tool_prefix: Optional[str],  # Custom naming convention
+    add_handoff_messages: bool,  # Protocol message visibility
+    agent_names: set[str],  # Registry of specialized agents
 ) -> ToolNode:
-    """Prepare the ToolNode to use in supervisor agent."""
+    """Prepare the ToolNode to use in supervisor agent.
+    
+    Implements dynamic tool augmentation by combining user tools with
+    auto-generated handoff tools for agent delegation. Preserves
+    user customizations while ensuring complete routing capability.
+    """
     if isinstance(tools, ToolNode):
         input_tool_node = tools
         tool_classes = list(tools.tools_by_name.values())
@@ -202,16 +292,21 @@ def _prepare_tool_node(
     return tool_node
 
 
+# LEARNING: Minimalist graph state schema with append-only message field
+# TLDR: A simple container for storing the conversation history
 class _OuterState(TypedDict):
     """The state of the supervisor workflow."""
 
+    # add_messages annotation provides append semantics instead of replacement
     messages: Annotated[Sequence[AnyMessage], add_messages]
 
 
+# LEARNING: Public API factory function for hierarchical agent orchestration
+# TLDR: The main function that creates our team of AI agents with a boss
 def create_supervisor(
-    agents: list[Pregel],
-    *,
-    model: LanguageModelLike,
+    agents: list[Pregel],  # Registry of specialized agents
+    *,  # Keyword-only parameter enforcement
+    model: LanguageModelLike,  # Supervisor reasoning model
     tools: list[BaseTool | Callable] | ToolNode | None = None,
     prompt: Prompt | None = None,
     response_format: Optional[
@@ -383,19 +478,25 @@ def create_supervisor(
     if add_handoff_back_messages is None:
         add_handoff_back_messages = add_handoff_messages
 
+    # Adaptive schema selection based on structured output requirements
     supervisor_schema = state_schema or (
         AgentStateWithStructuredResponse if response_format is not None else AgentState
     )
+    # Graph state schema can differ from individual agent state schemas
     workflow_schema = state_schema or _OuterState
 
+    # Agent identity validation with clear error messages
+    # Enforces naming requirements critical for routing and debugging
     agent_names = set()
     for agent in agents:
+        # Explicit naming requirement prevents routing ambiguity
         if agent.name is None or agent.name == "LangGraph":
             raise ValueError(
                 "Please specify a name when you create your agent, either via `create_react_agent(..., name=agent_name)` "
                 "or via `graph.compile(name=name)`."
             )
 
+        # Name uniqueness prevents routing conflicts
         if agent.name in agent_names:
             raise ValueError(
                 f"Agent with name '{agent.name}' already exists. Agent names must be unique."
@@ -403,40 +504,68 @@ def create_supervisor(
 
         agent_names.add(agent.name)
 
+    # Prepare combined tool set with handoff capabilities
+    # Merges user tools with auto-generated delegation tools
     tool_node = _prepare_tool_node(
-        tools,
-        handoff_tool_prefix,
-        add_handoff_messages,
-        agent_names,
+        tools,  # User-provided task tools
+        handoff_tool_prefix,  # Optional naming convention
+        add_handoff_messages,  # Protocol message visibility
+        agent_names,  # Target registry
     )
+    # Extract raw tool objects for model binding
+    # Required because LLMs need direct tool objects rather than the container
     all_tools = list(tool_node.tools_by_name.values())
 
+    # Configure model with tools and identity attribution
+    # Provider-aware tool binding with parallel calling configuration
+    
+    # Conditional tool binding based on provider requirements
     if _should_bind_tools(model, all_tools):
         if _supports_disable_parallel_tool_calls(model):
+            # Enable/disable parallel tool calls based on user preference
             model = cast(BaseChatModel, model).bind_tools(
                 all_tools, parallel_tool_calls=parallel_tool_calls
             )
         else:
+            # Standard tool binding for providers without parallel control
             model = cast(BaseChatModel, model).bind_tools(all_tools)
 
+    # Optional agent attribution wrapper
+    # Enhances message attribution for better multi-agent awareness
     if include_agent_name:
         model = with_agent_name(model, include_agent_name)
 
+    # Create supervisor agent using ReAct pattern
+    # This enables deliberative coordination and task delegation
     supervisor_agent = create_react_agent(
-        name=supervisor_name,
-        model=model,
-        tools=tool_node,
-        prompt=prompt,
-        state_schema=supervisor_schema,
-        response_format=response_format,
-        pre_model_hook=pre_model_hook,
-        post_model_hook=post_model_hook,
+        name=supervisor_name,  # Agent identity
+        model=model,  # Configured model with tools
+        tools=tool_node,  # Combined tool set
+        prompt=prompt,  # Coordination instructions
+        state_schema=supervisor_schema,  # State management schema
+        response_format=response_format,  # Optional structured output
+        pre_model_hook=pre_model_hook,  # Message history management
+        post_model_hook=post_model_hook,  # Response filtering/validation
     )
 
+    # Construct graph with star topology and hierarchical flow
+    # This implements centralized coordination with specialized execution
+    
+    # Initialize graph builder with schema validation
     builder = StateGraph(workflow_schema, context_schema=context_schema)
+    
+    # Add supervisor node with explicit possible destinations
+    # This enables static validation of routing paths
     builder.add_node(supervisor_agent, destinations=tuple(agent_names) + (END,))
+    
+    # Define entry point - all workflows start with supervisor
+    # This establishes the centralized coordination pattern
     builder.add_edge(START, supervisor_agent.name)
+    
+    # Add and connect each specialized agent
     for agent in agents:
+        # Wrap each agent with consistent processing logic
+        # This standardizes message filtering and protocol handling
         builder.add_node(
             agent.name,
             _make_call_agent(
@@ -446,6 +575,8 @@ def create_supervisor(
                 supervisor_name=supervisor_name,
             ),
         )
+        # Add return edge from agent to supervisor
+        # This completes the delegation cycle
         builder.add_edge(agent.name, supervisor_agent.name)
 
     return builder
