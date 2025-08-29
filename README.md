@@ -7,6 +7,7 @@ A Python library for creating hierarchical multi-agent systems using [LangGraph]
 - 🤖 **Create a supervisor agent** to orchestrate multiple specialized agents
 - 🛠️ **Tool-based agent handoff mechanism** for communication between agents
 - 📝 **Flexible message history management** for conversation control
+- 📊 **Observability with Langfuse** for tracing and monitoring your multi-agent workflows
 
 This library is built on top of [LangGraph](https://github.com/langchain-ai/langgraph), a powerful framework for building agent applications, and comes with out-of-box support for [streaming](https://langchain-ai.github.io/langgraph/how-tos/#streaming), [short-term and long-term memory](https://langchain-ai.github.io/langgraph/concepts/memory/) and [human-in-the-loop](https://langchain-ai.github.io/langgraph/concepts/human_in_the_loop/)
 
@@ -14,6 +15,13 @@ This library is built on top of [LangGraph](https://github.com/langchain-ai/lang
 
 ```bash
 pip install langgraph-supervisor
+```
+
+For observability with Langfuse:
+
+```bash
+pip install "langfuse>=2.0.0"
+pip show langfuse
 ```
 
 > [!Note]
@@ -373,4 +381,55 @@ result = app.invoke({
 
 for m in result["messages"]:
     m.pretty_print()
+```
+
+## Observability with Langfuse
+
+You can observe what your multi-agent supervisor workflow is doing by
+integrating with [Langfuse](https://langfuse.com/). Langfuse provides tracing, monitoring, and analytics for LLM applications.
+
+### Setup
+
+This assumes you have already set up an account, org, and project at `http://localhost:3000` and gotten API keys. 
+
+1. Create a `.env` based on this project's `.env.template`.
+
+```bash
+  # Copy and configure the .env file
+  cp langgraph_supervisor/.env.template .env
+  # Edit .env with your API keys and configuration
+  ```
+
+2. Start your local Langfuse instance in docker (alternative to using the Langfuse cloud service):
+
+```bash
+docker compose --project-directory langfuse up -d
+```
+
+### Basic Usage
+
+1. Call `LangfuseSupervisorTracer`'s `trace_workflow` on your workflow object. (See example: `ea_demo.py`). 
+- This will automatically trace your supervisor workflow, including:
+    - LLM calls made by the supervisor and worker agents
+    - Agent handoffs and transitions
+    - Tool usage and outputs
+    - Message flow between agents
+
+2. Visit the Langfuse UI at `http://localhost:3000` to explore your workflow.
+(Hint: `Project > Observability > Tracing` is a good place to start!)
+
+### Quickstart Demo
+
+Once you have followed Setup intstructions, run the following to see a demo!
+
+```bash
+  # Create and activate virtual environment
+  python3.10 -m venv .venv
+  source .venv/bin/activate
+
+  # Install the supervisor package and project dependencies
+  pip install -e .
+
+  # Run the demo
+  python3.10 coffee_assistant_demo.py
 ```
